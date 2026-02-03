@@ -396,8 +396,21 @@
           // Reset consecutive error counter on successful API call
           consecutiveErrors = 0;
           
-          // Use API progress if available, otherwise use time-based progress
-          const apiProgress = statusData.progress_percent || 0;
+          // Extract progress from API response or message
+          let apiProgress = statusData.progress_percent;
+          
+          // If progress_percent is null, try to extract from message
+          if (apiProgress === null || apiProgress === undefined) {
+            const progressMatch = statusData.message.match(/(\d+)%/);
+            if (progressMatch) {
+              apiProgress = parseInt(progressMatch[1]);
+              console.log('Extracted progress from message:', apiProgress);
+            } else {
+              apiProgress = 0;
+            }
+          }
+          
+          // Use the higher of API progress or time-based progress
           const currentProgress = Math.max(apiProgress, timeBasedProgress);
           
           setProgress(currentProgress);
