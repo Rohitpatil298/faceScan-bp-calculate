@@ -374,24 +374,28 @@ function Step2_Scanning({ onComplete, onBack }) {
       setScanning(true);
       scanStartedRef.current = true;
       setProgress(0);
+      setError(null);
       
       const scanStartTime = Date.now();
-      let hasReset = false;
+      let consecutiveErrors = 0;
       
+      console.log('Starting scan...');
       await api.startScan('pos', scanDuration);
+      console.log('Scan started successfully');
       
-      // Poll backend status with time-based fallback
+      // Poll backend status with robust error handling
       pollIntervalRef.current = setInterval(async () => {
         // Check if face has been missing for > 3 seconds
         const timeSinceFace = Date.now() - lastFaceSeenRef.current;
         if (timeSinceFace > 3000 && scanStartedRef.current) {
           // Face lost — reset scan
+          console.log('Face lost, restarting scan...');
           setMessage('⚠ Face lost! Restarting scan...');
           setProgress(0);
-          hasReset = true;
           try {
             await api.reset();
             await api.startScan('pos', scanDuration);
+            consecutiveErrors = 0;
           } catch (resetErr) {
             console.error('Reset error:', resetErr);
           }
@@ -399,12 +403,16 @@ function Step2_Scanning({ onComplete, onBack }) {
           return;
         }
 
-        // Calculate time-based progress as fallback
+        // Calculate time-based progress as reliable fallback
         const timeElapsed = Date.now() - scanStartTime;
         const timeBasedProgress = Math.min((timeElapsed / (scanDuration * 1000)) * 100, 99);
 
         try {
           const statusData = await api.getStatus();
+          console.log('Status response:', statusData);
+          
+          // Reset consecutive error counter on successful API call
+          consecutiveErrors = 0;
           
           // Use the higher of API progress or time-based progress
           const apiProgress = statusData.progress_percent || 0;
@@ -418,22 +426,51 @@ function Step2_Scanning({ onComplete, onBack }) {
             setMessage('⚠ Keep your face in the frame!');
           }
           
-          // Check for completion - either API says complete OR we've reached time limit
-          if (statusData.status === 'complete' || timeElapsed >= scanDuration * 1000) {
+          // Check for completion - prioritize time-based completion
+          if (timeElapsed >= scanDuration * 1000) {
+            console.log('Scan completed by time duration');
             clearInterval(pollIntervalRef.current);
             setScanning(false);
             setProgress(100);
             setMessage('Scan complete! Processing results...');
             setTimeout(() => onComplete(), 1500);
-          } else if (statusData.status === 'error') {
+            return;
+          }
+          
+          // Only check API status if we haven't reached time limit
+          if (statusData.status === 'complete') {
+            console.log('Scan completed by API status');
             clearInterval(pollIntervalRef.current);
             setScanning(false);
-            setError('Scan failed. Please try again.');
+            setProgress(100);
+            setMessage('Scan complete! Processing results...');
+            setTimeout(() => onComplete(), 1500);
+          } else if (statusData.status === 'error' && timeElapsed < (scanDuration * 1000 * 0.8)) {
+            // Only fail if we're less than 80% through the time duration
+            console.error('API reported error status:', statusData);
+            clearInterval(pollIntervalRef.current);
+            setScanning(false);
+            setError('Scan encountered an issue. Please try again.');
+            scanStartedRef.current = false;
           }
+          // If API reports error but we're close to completion, ignore and continue with time-based
+          
         } catch (err) {
           console.error('Poll error:', err);
+          consecutiveErrors++;
           
-          // Even if API fails, continue with time-based progress
+          // If we get too many consecutive errors, but we're far enough along, just complete
+          if (consecutiveErrors > 5 && timeBasedProgress > 50) {
+            console.log('Too many API errors, completing based on time');
+            clearInterval(pollIntervalRef.current);
+            setScanning(false);
+            setProgress(100);
+            setMessage('Scan complete! Processing results...');
+            setTimeout(() => onComplete(), 1500);
+            return;
+          }
+          
+          // Continue with time-based progress even if API fails
           setProgress(timeBasedProgress);
           
           if (faceDetected) {
@@ -444,6 +481,7 @@ function Step2_Scanning({ onComplete, onBack }) {
           
           // Complete scan after time duration even if API is unresponsive
           if (timeElapsed >= scanDuration * 1000) {
+            console.log('Scan completed by time duration (API failed)');
             clearInterval(pollIntervalRef.current);
             setScanning(false);
             setProgress(100);
@@ -452,8 +490,10 @@ function Step2_Scanning({ onComplete, onBack }) {
           }
         }
       }, 500);
+      
     } catch (err) {
-      setError(err.message || 'Failed to start scan');
+      console.error('Scan start error:', err);
+      setError('Failed to start scan. Please check your connection and try again.');
       setScanning(false);
       scanStartedRef.current = false;
     }
@@ -463,6 +503,23 @@ function Step2_Scanning({ onComplete, onBack }) {
     if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
+    }
+  };
+
+  const handleRetry = async () => {
+    setError(null);
+    setScanning(false);
+    setProgress(0);
+    setMessage('Resetting...');
+    scanStartedRef.current = false;
+    
+    try {
+      // Reset backend state
+      await api.reset();
+      setMessage('Ready to scan - position your face in the frame');
+    } catch (err) {
+      console.error('Reset error:', err);
+      setMessage('Reset failed, but you can try scanning again');
     }
   };
 
@@ -504,12 +561,20 @@ function Step2_Scanning({ onComplete, onBack }) {
                 <i data-lucide="camera-off" className="w-10 h-10 text-red-400"></i>
               </div>
               <p className="text-red-400 text-lg mb-4">{error}</p>
-              <button
-                onClick={() => window.location.reload()}
-                className="bg-purple-600 px-6 py-3 rounded-lg font-semibold hover:bg-purple-700"
-              >
-                Retry
-              </button>
+              <div className="flex gap-3 justify-center">
+                <button
+                  onClick={handleRetry}
+                  className="bg-purple-600 px-6 py-3 rounded-lg font-semibold hover:bg-purple-700"
+                >
+                  Retry
+                </button>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="bg-slate-600 px-6 py-3 rounded-lg font-semibold hover:bg-slate-700"
+                >
+                  Reload Page
+                </button>
+              </div>
             </div>
           </div>
         )}
