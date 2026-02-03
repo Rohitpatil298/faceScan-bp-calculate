@@ -3,9 +3,7 @@ const { useState, useEffect, useRef } = React;
 // ============================================================================
 // Configuration — Auto-detect API URL
 // ============================================================================
-const API_BASE = window.location.hostname === 'localhost' 
-  ? 'http://localhost:8000'  // Local development
-  : 'https://facescan-bp-calculate.onrender.com';  // ← CHANGE THIS to your Render backend URL
+const API_BASE = 'http://localhost:8000';
 
 // ============================================================================
 // API Client
