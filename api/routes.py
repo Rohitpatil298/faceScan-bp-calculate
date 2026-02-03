@@ -15,7 +15,7 @@ Endpoint summary
     GET  /docs                — Auto-generated Swagger UI (FastAPI built-in)
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, File, UploadFile
 from api.schemas import (
     UserMetadata,
     ScanRequest,
@@ -24,6 +24,8 @@ from api.schemas import (
 )
 from api.session import ScanSession
 from utils.logger import get_logger
+import cv2
+import numpy as np
 
 logger = get_logger("api.routes")
 
@@ -98,6 +100,43 @@ async def start_scan(request: ScanRequest = ScanRequest()):
             "Poll GET /scan/status for progress."
         ),
     }
+
+
+@router.post("/scan/frame")
+async def upload_frame(file: UploadFile = File(...)):
+    """
+    Receive a video frame from the frontend during an active scan.
+    The frame should be sent as a JPEG or PNG image.
+    
+    This allows the frontend to control the camera while the backend
+    processes the frames for rPPG analysis.
+    """
+    if _session.status != "scanning":
+        raise HTTPException(
+            status_code=400,
+            detail="No active scan. Start a scan first via POST /scan/start."
+        )
+    
+    try:
+        # Read the uploaded image file
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            raise HTTPException(status_code=400, detail="Invalid image data")
+        
+        # Feed the frame to the session
+        _session.add_frame(frame)
+        
+        return {
+            "status": "ok",
+            "message": "Frame received",
+            "progress": _session.progress
+        }
+    except Exception as e:
+        logger.error(f"Error processing frame: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing frame: {str(e)}")
 
 
 @router.get("/scan/status")
