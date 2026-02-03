@@ -11,7 +11,7 @@ Run with:  python main.py
     Do NOT use these readings for clinical diagnosis or treatment decisions.
     Consult a qualified healthcare professional for medical advice.
 """
-
+import os
 import uvicorn
 from api.app import create_app
 
@@ -20,7 +20,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=int(os.getenv("PORT", 8000)),
         reload=False,
         log_level="info",
     )
