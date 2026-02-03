@@ -1,0 +1,29 @@
+# ============================================================
+# rPPG Vital-Signs Estimation — Python Dependencies
+# ============================================================
+# Pin major.minor versions for reproducibility; patch versions
+# are left flexible so security patches are picked up automatically.
+# Tested on Python 3.10 – 3.12.
+# ============================================================
+
+# ── Core scientific stack ───────────────────────────────────
+numpy>=1.24,<2.0
+scipy>=1.10,<2.0
+
+# ── Computer vision ────────────────────────────────────────
+opencv-python>=4.7,<5.0          # cv2 — camera capture & display
+
+# ── Face detection / landmark estimation ───────────────────
+mediapipe>=0.10                  # Google MediaPipe Face Mesh
+# Note: mediapipe does NOT support Python 3.12+ on all platforms.
+#       If installation fails, try: pip install mediapipe-python==0.10.0
+
+# ── Machine learning ───────────────────────────────────────
+scikit-learn>=1.2,<2.0           # RandomForest, Pipeline, StandardScaler
+
+# ── Web API ─────────────────────────────────────────────────
+fastapi>=0.100,<1.0              # Async HTTP framework
+uvicorn[standard]>=0.22,<1.0     # ASGI server
+
+# ── HTTP client (optional — for integration tests) ─────────
+httpx>=0.24,<1.0                 # Used by FastAPI's TestClient
