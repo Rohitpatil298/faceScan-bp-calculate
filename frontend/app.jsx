@@ -18,7 +18,7 @@ const api = {
     if (!res.ok) throw new Error('Failed to set metadata');
     return res.json();
   },
-
+  
   async startScan(algorithm = 'pos', duration = 45) {
     const res = await fetch(`${API_BASE}/scan/start`, {
       method: 'POST',
@@ -31,33 +31,19 @@ const api = {
     }
     return res.json();
   },
-
+  
   async getStatus() {
     const res = await fetch(`${API_BASE}/scan/status`);
     if (!res.ok) throw new Error('Failed to get status');
     return res.json();
   },
-
-  async sendFrame(blob) {
-    const formData = new FormData();
-    formData.append('file', blob, 'frame.jpg');
-    const res = await fetch(`${API_BASE}/scan/frame`, {
-      method: 'POST',
-      body: formData,
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || 'Failed to send frame');
-    }
-    return res.json();
-  },
-
+  
   async getResult() {
     const res = await fetch(`${API_BASE}/scan/result`);
     if (!res.ok) throw new Error('Failed to get result');
     return res.json();
   },
-
+  
   async reset() {
     const res = await fetch(`${API_BASE}/scan/reset`, { method: 'POST' });
     if (!res.ok) throw new Error('Failed to reset');
@@ -141,10 +127,11 @@ function Step1_UserInfo({ onNext }) {
                 key={g}
                 type="button"
                 onClick={() => setForm({ ...form, gender: g })}
-                className={`py-3 px-4 rounded-lg font-medium capitalize transition ${form.gender === g
-                  ? 'bg-purple-600 text-white'
-                  : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                  }`}
+                className={`py-3 px-4 rounded-lg font-medium capitalize transition ${
+                  form.gender === g
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                }`}
               >
                 {g}
               </button>
@@ -190,7 +177,7 @@ function Step1_UserInfo({ onNext }) {
 
       {/* Disclaimer */}
       <div className="mt-6 p-4 bg-amber-900/20 border border-amber-700 rounded-lg text-sm text-amber-200">
-        <strong>⚠️ Wellness Tool Disclaimer:</strong> This is an estimation system, NOT a medical device.
+        <strong>⚠️ Wellness Tool Disclaimer:</strong> This is an estimation system, NOT a medical device. 
         Results are for wellness tracking only. Consult a healthcare professional for medical advice.
       </div>
     </div>
@@ -198,491 +185,192 @@ function Step1_UserInfo({ onNext }) {
 }
 
 // ============================================================================
-// Step 2: Real-Time Camera Scanning with Face Detection
+// Step 2: Face Scanning
 // ============================================================================
 function Step2_Scanning({ onComplete, onBack }) {
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const [cameraReady, setCameraReady] = useState(false);
-  const [scanning, setScanning] = useState(false);
+  const [status, setStatus] = useState('idle'); // idle | scanning | complete | error
   const [progress, setProgress] = useState(0);
-  const [faceDetected, setFaceDetected] = useState(false);
-  const [message, setMessage] = useState('Initializing camera...');
+  const [message, setMessage] = useState('');
   const [scanDuration] = useState(45);
-  const [error, setError] = useState(null);
+  const pollInterval = useRef(null);
 
-  const streamRef = useRef(null);
-  const pollIntervalRef = useRef(null);
-  const lastFaceSeenRef = useRef(Date.now());
-  const scanStartedRef = useRef(false);
-
-  // Initialize camera on mount
   useEffect(() => {
-    initCamera();
+    lucide.createIcons();
+  }, [status, progress]);
+
+  const startScan = async () => {
+    try {
+      await api.startScan('pos', scanDuration);
+      setStatus('scanning');
+      setProgress(0);
+      
+      // Poll status every 500ms
+      pollInterval.current = setInterval(async () => {
+        try {
+          const statusData = await api.getStatus();
+          setProgress(statusData.progress_percent || 0);
+          setMessage(statusData.message || '');
+          
+          if (statusData.status === 'complete') {
+            clearInterval(pollInterval.current);
+            setStatus('complete');
+            setTimeout(() => onComplete(), 1500);
+          } else if (statusData.status === 'error') {
+            clearInterval(pollInterval.current);
+            setStatus('error');
+            setMessage('Scan failed. Please try again.');
+          }
+        } catch (err) {
+          console.error('Poll error:', err);
+        }
+      }, 500);
+    } catch (err) {
+      setStatus('error');
+      setMessage(err.message);
+    }
+  };
+
+  useEffect(() => {
     return () => {
-      cleanup();
+      if (pollInterval.current) clearInterval(pollInterval.current);
     };
   }, []);
 
-  // Redraw icons when state changes
-  useEffect(() => {
-    lucide.createIcons();
-  }, [cameraReady, scanning, faceDetected, progress]);
-
-  const initCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: 'user',
-        },
-      });
-
-      streamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current.play();
-          setCameraReady(true);
-          setMessage('Camera ready! Position your face in the frame.');
-          startFaceDetection();
-        };
-      }
-    } catch (err) {
-      console.error('Camera error:', err);
-      setError('Failed to access camera. Please allow camera permissions and refresh.');
-      setMessage('Camera access denied');
-    }
-  };
-
-  const startFaceDetection = async () => {
-    // Load MediaPipe FaceMesh
-    const faceMesh = new FaceMesh({
-      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
-    });
-
-    faceMesh.setOptions({
-      maxNumFaces: 1,
-      refineLandmarks: true,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5,
-    });
-
-    faceMesh.onResults(onFaceResults);
-
-    const camera = new Camera(videoRef.current, {
-      onFrame: async () => {
-        await faceMesh.send({ image: videoRef.current });
-      },
-      width: 1280,
-      height: 720,
-    });
-    camera.start();
-  };
-
-  const onFaceResults = (results) => {
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!canvas || !video) return;
-
-    const ctx = canvas.getContext('2d');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    // Draw video frame
-    ctx.save();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    // Draw face landmarks if detected
-    if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-      const landmarks = results.multiFaceLandmarks[0];
-
-      // Draw face mesh
-      ctx.strokeStyle = '#00FF00';
-      ctx.lineWidth = 1;
-
-      // Draw minimal overlay (just outline)
-      drawFaceMesh(ctx, landmarks, canvas.width, canvas.height);
-
-      // Draw bounding box
-      const bbox = getFaceBoundingBox(landmarks, canvas.width, canvas.height);
-      ctx.strokeStyle = '#00FF00';
-      ctx.lineWidth = 3;
-      ctx.strokeRect(bbox.x, bbox.y, bbox.width, bbox.height);
-
-      // Draw "FACE DETECTED" label
-      ctx.fillStyle = '#00FF00';
-      ctx.font = 'bold 24px Inter';
-      ctx.fillText('✓ FACE DETECTED', bbox.x, bbox.y - 10);
-
-      setFaceDetected(true);
-      lastFaceSeenRef.current = Date.now();
-    } else {
-      setFaceDetected(false);
-
-      // Draw warning overlay
-      ctx.fillStyle = 'rgba(239, 68, 68, 0.3)';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      ctx.fillStyle = '#EF4444';
-      ctx.font = 'bold 32px Inter';
-      ctx.textAlign = 'center';
-      ctx.fillText('⚠ NO FACE DETECTED', canvas.width / 2, canvas.height / 2);
-      ctx.font = '20px Inter';
-      ctx.fillText('Please position your face in the frame', canvas.width / 2, canvas.height / 2 + 40);
-    }
-
-    ctx.restore();
-  };
-
-  const drawFaceMesh = (ctx, landmarks, width, height) => {
-    // Draw key facial contours only (not all 468 points)
-    const FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
-
-    ctx.beginPath();
-    for (let i = 0; i < FACE_OVAL.length; i++) {
-      const point = landmarks[FACE_OVAL[i]];
-      const x = point.x * width;
-      const y = point.y * height;
-      if (i === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
-    }
-    ctx.closePath();
-    ctx.stroke();
-  };
-
-  const getFaceBoundingBox = (landmarks, width, height) => {
-    let minX = Infinity, minY = Infinity, maxX = 0, maxY = 0;
-
-    landmarks.forEach(lm => {
-      const x = lm.x * width;
-      const y = lm.y * height;
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
-    });
-
-    return {
-      x: minX,
-      y: minY,
-      width: maxX - minX,
-      height: maxY - minY,
-    };
-  };
-
-  const startScan = async () => {
-    if (!faceDetected) {
-      setMessage('Please position your face in the frame first');
-      return;
-    }
-
-    try {
-      setScanning(true);
-      scanStartedRef.current = true;
-      setProgress(0);
-      setError(null);
-
-      const scanStartTime = Date.now();
-      let consecutiveErrors = 0;
-
-      console.log('Starting scan...');
-      await api.startScan('pos', scanDuration);
-      console.log('Scan started successfully - sending frames to backend');
-
-      // Frame capture interval - send frames to backend
-      const frameCaptureInterval = setInterval(async () => {
-        const canvas = canvasRef.current;
-        if (!canvas || !scanning) {
-          clearInterval(frameCaptureInterval);
-          return;
-        }
-
-        try {
-          // Convert canvas to blob and send to backend
-          canvas.toBlob(async (blob) => {
-            if (blob && scanStartedRef.current) {
-              try {
-                await api.sendFrame(blob);
-              } catch (err) {
-                console.error('Frame send error:', err);
-              }
-            }
-          }, 'image/jpeg', 0.8);
-        } catch (err) {
-          console.error('Frame capture error:', err);
-        }
-      }, 100); // Send frames every 100ms (~10 FPS)
-
-      // Poll backend status
-      pollIntervalRef.current = setInterval(async () => {
-        // Calculate time-based progress as reliable fallback
-        const timeElapsed = Date.now() - scanStartTime;
-        const timeBasedProgress = Math.min((timeElapsed / (scanDuration * 1000)) * 100, 99);
-
-        try {
-          const statusData = await api.getStatus();
-          console.log('Status response:', statusData);
-
-          // Reset consecutive error counter on successful API call
-          consecutiveErrors = 0;
-
-          // Extract progress from API response or message
-          let apiProgress = statusData.progress_percent;
-
-          // If progress_percent is null, try to extract from message
-          if (apiProgress === null || apiProgress === undefined) {
-            const progressMatch = statusData.message.match(/(\d+)%/);
-            if (progressMatch) {
-              apiProgress = parseInt(progressMatch[1]);
-              console.log('Extracted progress from message:', apiProgress);
-            } else {
-              apiProgress = 0;
-            }
-          }
-
-          // Use the higher of API progress or time-based progress
-          const currentProgress = Math.max(apiProgress, timeBasedProgress);
-
-          setProgress(currentProgress);
-
-          if (faceDetected) {
-            setMessage(`Scanning... ${Math.round(currentProgress)}% complete`);
-          } else {
-            setMessage('⚠ Keep your face in the frame!');
-          }
-
-          // Check for completion - prioritize API status, fallback to time-based
-          if (statusData.status === 'complete') {
-            console.log('Scan completed by API status');
-            clearInterval(pollIntervalRef.current);
-            clearInterval(frameCaptureInterval);
-            setScanning(false);
-            setProgress(100);
-            setMessage('Scan complete! Processing results...');
-            setTimeout(() => onComplete(), 1500);
-            return;
-          } else if (timeElapsed >= scanDuration * 1000) {
-            console.log('Scan completed by time duration');
-            clearInterval(pollIntervalRef.current);
-            clearInterval(frameCaptureInterval);
-            setScanning(false);
-            setProgress(100);
-            setMessage('Scan complete! Processing results...');
-            setTimeout(() => onComplete(), 1500);
-            return;
-          } else if (statusData.status === 'error') {
-            console.error('API reported error status:', statusData);
-            clearInterval(pollIntervalRef.current);
-            clearInterval(frameCaptureInterval);
-            setScanning(false);
-            setError(`Scan failed: ${statusData.message || 'Backend processing error'}`);
-            scanStartedRef.current = false;
-            return;
-          }
-
-        } catch (err) {
-          console.error('Poll error:', err);
-          consecutiveErrors++;
-
-          // If we get too many consecutive errors, but we're far enough along, just complete
-          if (consecutiveErrors > 10 && timeBasedProgress > 80) {
-            console.log('Too many API errors, completing based on time');
-            clearInterval(pollIntervalRef.current);
-            clearInterval(frameCaptureInterval);
-            setScanning(false);
-            setProgress(100);
-            setMessage('Scan complete! Processing results...');
-            setTimeout(() => onComplete(), 1500);
-            return;
-          }
-
-          // Continue with time-based progress even if API fails
-          setProgress(timeBasedProgress);
-
-          if (faceDetected) {
-            setMessage(`Scanning... ${Math.round(timeBasedProgress)}% complete`);
-          } else {
-            setMessage('⚠ Keep your face in the frame!');
-          }
-
-          // Complete scan after time duration even if API is unresponsive
-          if (timeElapsed >= scanDuration * 1000) {
-            console.log('Scan completed by time duration (API failed)');
-            clearInterval(pollIntervalRef.current);
-            clearInterval(frameCaptureInterval);
-            setScanning(false);
-            setProgress(100);
-            setMessage('Scan complete! Processing results...');
-            setTimeout(() => onComplete(), 1500);
-          }
-        }
-      }, 1000); // Poll every 1 second
-
-    } catch (err) {
-      console.error('Scan start error:', err);
-      setError(`Failed to start scan: ${err.message}`);
-      setScanning(false);
-      scanStartedRef.current = false;
-    }
-  };
-
-  const cleanup = () => {
-    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-    }
-  };
-
-  const handleRetry = async () => {
-    setError(null);
-    setScanning(false);
-    setProgress(0);
-    setMessage('Resetting...');
-    scanStartedRef.current = false;
-
-    try {
-      // Reset backend state
-      await api.reset();
-      setMessage('Ready to scan - position your face in the frame');
-    } catch (err) {
-      console.error('Reset error:', err);
-      setMessage('Reset failed, but you can try scanning again');
-    }
-  };
-
   return (
-    <div className="max-w-6xl mx-auto">
-      <div className="text-center mb-6">
+    <div className="max-w-3xl mx-auto">
+      <div className="text-center mb-8">
         <h2 className="text-3xl font-bold mb-2">Face Scan</h2>
-        <p className="text-slate-400">Keep your face visible for {scanDuration} seconds</p>
+        <p className="text-slate-400">Position your face in the camera and stay still</p>
       </div>
 
-      {/* Camera Preview */}
-      <div className="relative bg-black rounded-2xl overflow-hidden shadow-2xl" style={{ aspectRatio: '16/9' }}>
-        <video
-          ref={videoRef}
-          className="absolute inset-0 w-full h-full object-cover"
-          playsInline
-          muted
-          style={{ display: cameraReady ? 'block' : 'none' }}
-        />
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 w-full h-full"
-          style={{ display: cameraReady ? 'block' : 'none' }}
-        />
-
-        {!cameraReady && !error && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center">
-              <div className="inline-block w-16 h-16 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mb-4"></div>
-              <p className="text-white text-lg">{message}</p>
+      {/* Camera Preview Area */}
+      <div className="bg-slate-800 rounded-2xl p-8 shadow-2xl">
+        {status === 'idle' && (
+          <div className="text-center">
+            <div className="mb-8">
+              <div className="inline-flex items-center justify-center w-32 h-32 rounded-full bg-slate-700 mb-4">
+                <i data-lucide="camera" className="w-16 h-16 text-purple-400"></i>
+              </div>
+              <h3 className="text-2xl font-bold mb-4">Ready to Scan</h3>
+              
+              {/* Instructions */}
+              <div className="bg-slate-700 rounded-xl p-6 mb-6 text-left space-y-3">
+                <p className="font-semibold text-lg mb-3">📋 Before you start:</p>
+                <div className="space-y-2 text-slate-300">
+                  <div className="flex items-start gap-3">
+                    <i data-lucide="check-circle" className="w-5 h-5 text-green-400 mt-0.5"></i>
+                    <span>Sit 40-80 cm from your camera</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <i data-lucide="check-circle" className="w-5 h-5 text-green-400 mt-0.5"></i>
+                    <span>Ensure good, even lighting (avoid backlighting)</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <i data-lucide="check-circle" className="w-5 h-5 text-green-400 mt-0.5"></i>
+                    <span>Keep your forehead and cheeks visible</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <i data-lucide="check-circle" className="w-5 h-5 text-green-400 mt-0.5"></i>
+                    <span>Stay as still as possible for {scanDuration} seconds</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <i data-lucide="alert-circle" className="w-5 h-5 text-amber-400 mt-0.5"></i>
+                    <span>If your face isn't detected, the scan will pause</span>
+                  </div>
+                </div>
+              </div>
             </div>
+
+            <button
+              onClick={startScan}
+              className="gradient-bg px-8 py-4 rounded-lg font-bold text-lg hover:opacity-90 inline-flex items-center gap-2"
+            >
+              <i data-lucide="play" className="w-6 h-6"></i>
+              Start {scanDuration}s Scan
+            </button>
           </div>
         )}
 
-        {error && (
-          <div className="absolute inset-0 flex items-center justify-center bg-slate-900">
-            <div className="text-center p-8">
-              <div className="w-20 h-20 rounded-full bg-red-600/20 flex items-center justify-center mx-auto mb-4">
-                <i data-lucide="camera-off" className="w-10 h-10 text-red-400"></i>
+        {status === 'scanning' && (
+          <div className="text-center">
+            {/* Animated Face Circle */}
+            <div className="relative inline-block mb-6">
+              <div className="w-48 h-48 rounded-full border-8 border-purple-600 flex items-center justify-center pulse-ring">
+                <i data-lucide="scan-face" className="w-24 h-24 text-purple-400"></i>
               </div>
-              <p className="text-red-400 text-lg mb-4">{error}</p>
-              <div className="flex gap-3 justify-center">
-                <button
-                  onClick={handleRetry}
-                  className="bg-purple-600 px-6 py-3 rounded-lg font-semibold hover:bg-purple-700"
-                >
-                  Retry
-                </button>
-                <button
-                  onClick={() => window.location.reload()}
-                  className="bg-slate-600 px-6 py-3 rounded-lg font-semibold hover:bg-slate-700"
-                >
-                  Reload Page
-                </button>
+              <div className="absolute -top-2 -right-2 w-12 h-12 bg-green-500 rounded-full flex items-center justify-center animate-pulse">
+                <i data-lucide="activity" className="w-6 h-6"></i>
               </div>
             </div>
-          </div>
-        )}
 
-        {/* Progress Overlay */}
-        {scanning && (
-          <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-6">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-white font-semibold">{message}</span>
-              <span className="text-white font-bold text-xl">{Math.round(progress)}%</span>
+            {/* Progress Bar */}
+            <div className="mb-6">
+              <div className="flex justify-between mb-2">
+                <span className="text-sm font-semibold">Scanning...</span>
+                <span className="text-sm font-semibold">{Math.round(progress)}%</span>
+              </div>
+              <div className="w-full bg-slate-700 rounded-full h-4 overflow-hidden">
+                <div
+                  className="gradient-bg h-full transition-all duration-300"
+                  style={{ width: `${progress}%` }}
+                ></div>
+              </div>
             </div>
-            <div className="w-full bg-slate-700 rounded-full h-3 overflow-hidden">
-              <div
-                className="gradient-bg h-full transition-all duration-300"
-                style={{ width: `${progress}%` }}
-              ></div>
-            </div>
-            <p className="text-slate-300 text-sm mt-2">
+
+            {/* Status Message */}
+            <p className="text-slate-300 text-lg mb-4">{message}</p>
+
+            {/* Time Remaining */}
+            <p className="text-slate-400 text-sm">
               Time remaining: ~{Math.max(0, scanDuration - Math.floor((progress / 100) * scanDuration))}s
             </p>
           </div>
         )}
 
-        {/* Status Indicators */}
-        {cameraReady && !scanning && (
-          <div className="absolute top-4 right-4 flex gap-2">
-            <div className={`px-4 py-2 rounded-full font-semibold ${faceDetected ? 'bg-green-600' : 'bg-red-600'}`}>
-              {faceDetected ? '✓ Face Detected' : '✗ No Face'}
+        {status === 'complete' && (
+          <div className="text-center">
+            <div className="inline-flex items-center justify-center w-32 h-32 rounded-full gradient-success mb-6">
+              <i data-lucide="check" className="w-16 h-16"></i>
+            </div>
+            <h3 className="text-2xl font-bold mb-2">Scan Complete!</h3>
+            <p className="text-slate-400">Processing your results...</p>
+          </div>
+        )}
+
+        {status === 'error' && (
+          <div className="text-center">
+            <div className="inline-flex items-center justify-center w-32 h-32 rounded-full gradient-danger mb-6">
+              <i data-lucide="x-circle" className="w-16 h-16"></i>
+            </div>
+            <h3 className="text-2xl font-bold mb-2">Scan Failed</h3>
+            <p className="text-slate-400 mb-6">{message}</p>
+            <div className="flex gap-4 justify-center">
+              <button
+                onClick={onBack}
+                className="bg-slate-700 px-6 py-3 rounded-lg font-semibold hover:bg-slate-600"
+              >
+                Back
+              </button>
+              <button
+                onClick={() => { setStatus('idle'); setProgress(0); }}
+                className="gradient-bg px-6 py-3 rounded-lg font-semibold hover:opacity-90"
+              >
+                Try Again
+              </button>
             </div>
           </div>
         )}
       </div>
 
-      {/* Controls */}
-      <div className="mt-6 flex gap-4 justify-center">
-        {!scanning && cameraReady && (
-          <>
-            <button
-              onClick={onBack}
-              className="bg-slate-700 px-6 py-3 rounded-lg font-semibold hover:bg-slate-600 inline-flex items-center gap-2"
-            >
-              <i data-lucide="arrow-left" className="w-5 h-5"></i>
-              Back
-            </button>
-            <button
-              onClick={startScan}
-              disabled={!faceDetected}
-              className="gradient-bg px-8 py-3 rounded-lg font-bold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
-            >
-              <i data-lucide="play" className="w-5 h-5"></i>
-              Start {scanDuration}s Scan
-            </button>
-          </>
-        )}
-      </div>
-
-      {/* Instructions */}
-      {!scanning && cameraReady && (
-        <div className="mt-6 bg-slate-800 rounded-xl p-6">
-          <h3 className="font-bold text-lg mb-3">📋 Scan Instructions</h3>
-          <ul className="space-y-2 text-slate-300">
-            <li className="flex items-start gap-3">
-              <i data-lucide="check-circle" className="w-5 h-5 text-green-400 mt-0.5"></i>
-              <span>Keep your face in the green box for the entire {scanDuration} seconds</span>
-            </li>
-            <li className="flex items-start gap-3">
-              <i data-lucide="alert-triangle" className="w-5 h-5 text-amber-400 mt-0.5"></i>
-              <span>If your face leaves the frame for &gt;3 seconds, the scan will restart automatically</span>
-            </li>
-            <li className="flex items-start gap-3">
-              <i data-lucide="zap" className="w-5 h-5 text-blue-400 mt-0.5"></i>
-              <span>Stay as still as possible for best results</span>
-            </li>
-          </ul>
+      {status === 'idle' && (
+        <div className="mt-6 text-center">
+          <button
+            onClick={onBack}
+            className="text-slate-400 hover:text-white inline-flex items-center gap-2"
+          >
+            <i data-lucide="arrow-left" className="w-4 h-4"></i>
+            Back to Information
+          </button>
         </div>
       )}
     </div>
@@ -809,10 +497,11 @@ function Step3_Results({ onRestart }) {
         </div>
 
         {/* Stress Level */}
-        <div className={`rounded-2xl p-6 shadow-xl ${stress.level === 'Low' ? 'bg-gradient-to-br from-green-600 to-emerald-600' :
+        <div className={`rounded-2xl p-6 shadow-xl ${
+          stress.level === 'Low' ? 'bg-gradient-to-br from-green-600 to-emerald-600' :
           stress.level === 'Moderate' ? 'bg-gradient-to-br from-yellow-600 to-orange-600' :
-            'bg-gradient-to-br from-red-600 to-rose-600'
-          }`}>
+          'bg-gradient-to-br from-red-600 to-rose-600'
+        }`}>
           <div className="flex items-start justify-between mb-4">
             <div>
               <p className="text-white/90 text-sm font-semibold mb-1">Stress Level</p>
@@ -874,10 +563,11 @@ function App() {
             <React.Fragment key={step}>
               <div className="flex flex-col items-center">
                 <div
-                  className={`w-12 h-12 rounded-full flex items-center justify-center font-bold text-lg ${currentStep >= step
-                    ? 'gradient-bg text-white'
-                    : 'bg-slate-700 text-slate-400'
-                    }`}
+                  className={`w-12 h-12 rounded-full flex items-center justify-center font-bold text-lg ${
+                    currentStep >= step
+                      ? 'gradient-bg text-white'
+                      : 'bg-slate-700 text-slate-400'
+                  }`}
                 >
                   {currentStep > step ? '✓' : step}
                 </div>
@@ -887,8 +577,9 @@ function App() {
               </div>
               {step < 3 && (
                 <div
-                  className={`flex-1 h-1 mx-4 rounded ${currentStep > step ? 'bg-purple-600' : 'bg-slate-700'
-                    }`}
+                  className={`flex-1 h-1 mx-4 rounded ${
+                    currentStep > step ? 'bg-purple-600' : 'bg-slate-700'
+                  }`}
                 ></div>
               )}
             </React.Fragment>
