@@ -1,0 +1,32 @@
+# Netlify configuration for VitalSense AI Frontend
+# This tells Netlify to serve the /frontend directory and handle SPA routing
+
+[build]
+  # No build step needed — we're using CDN-hosted React
+  publish = "frontend"
+  command = "echo 'No build required - using CDN React'"
+
+[[redirects]]
+  # SPA routing — all paths serve index.html
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  # Cache static assets for 1 year
+  for = "/*.js"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*.css"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  # Security headers
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
