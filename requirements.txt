@@ -24,7 +24,6 @@ scikit-learn>=1.2,<2.0           # RandomForest, Pipeline, StandardScaler
 # ── Web API ─────────────────────────────────────────────────
 fastapi>=0.100,<1.0              # Async HTTP framework
 uvicorn[standard]>=0.22,<1.0     # ASGI server
-python-multipart>=0.0.5          # Required for file uploads (UploadFile)
 
 # ── HTTP client (optional — for integration tests) ─────────
 httpx>=0.24,<1.0                 # Used by FastAPI's TestClient
