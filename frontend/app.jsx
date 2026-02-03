@@ -32,6 +32,24 @@ const api = {
     return res.json();
   },
   
+  async sendFrame(frameDataUrl) {
+    try {
+      const res = await fetch(`${API_BASE}/scan/frame`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ frame: frameDataUrl }),
+      });
+      if (!res.ok) {
+        console.warn('Frame send failed:', res.statusText);
+        return { success: false };
+      }
+      return await res.json();
+    } catch (err) {
+      console.warn('Frame send error:', err);
+      return { success: false };
+    }
+  },
+  
   async getStatus() {
     const res = await fetch(`${API_BASE}/scan/status`);
     if (!res.ok) throw new Error('Failed to get status');
@@ -190,6 +208,7 @@ function Step1_UserInfo({ onNext }) {
 function Step2_Scanning({ onComplete, onBack }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const frameCanvasRef = useRef(null); // For frame capture
   const [cameraReady, setCameraReady] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -200,6 +219,7 @@ function Step2_Scanning({ onComplete, onBack }) {
   
   const streamRef = useRef(null);
   const pollIntervalRef = useRef(null);
+  const frameIntervalRef = useRef(null);
   const lastFaceSeenRef = useRef(Date.now());
   const scanStartedRef = useRef(false);
 
@@ -364,6 +384,28 @@ function Step2_Scanning({ onComplete, onBack }) {
     };
   };
 
+  const captureFrame = () => {
+    if (!videoRef.current || !faceDetected) return null;
+    
+    // Create a temporary canvas for frame capture
+    if (!frameCanvasRef.current) {
+      frameCanvasRef.current = document.createElement('canvas');
+    }
+    
+    const frameCanvas = frameCanvasRef.current;
+    const frameCtx = frameCanvas.getContext('2d');
+    const video = videoRef.current;
+    
+    frameCanvas.width = video.videoWidth;
+    frameCanvas.height = video.videoHeight;
+    
+    // Draw current video frame
+    frameCtx.drawImage(video, 0, 0, frameCanvas.width, frameCanvas.height);
+    
+    // Return base64 data URL
+    return frameCanvas.toDataURL('image/jpeg', 0.8);
+  };
+
   const startScan = async () => {
     if (!faceDetected) {
       setMessage('Please position your face in the frame first');
@@ -378,10 +420,27 @@ function Step2_Scanning({ onComplete, onBack }) {
       
       const scanStartTime = Date.now();
       let consecutiveErrors = 0;
+      let framesSent = 0;
       
       console.log('Starting scan...');
       await api.startScan('pos', scanDuration);
       console.log('Scan started successfully');
+      
+      // Start sending frames to backend
+      frameIntervalRef.current = setInterval(async () => {
+        if (faceDetected && scanStartedRef.current) {
+          const frameData = captureFrame();
+          if (frameData) {
+            try {
+              await api.sendFrame(frameData);
+              framesSent++;
+              console.log(`Frame ${framesSent} sent`);
+            } catch (err) {
+              console.warn('Failed to send frame:', err);
+            }
+          }
+        }
+      }, 100); // Send frame every 100ms (10 FPS)
       
       // Poll backend status with robust error handling
       pollIntervalRef.current = setInterval(async () => {
@@ -392,6 +451,7 @@ function Step2_Scanning({ onComplete, onBack }) {
           console.log('Face lost, restarting scan...');
           setMessage('⚠ Face lost! Restarting scan...');
           setProgress(0);
+          framesSent = 0;
           try {
             await api.reset();
             await api.startScan('pos', scanDuration);
@@ -409,7 +469,7 @@ function Step2_Scanning({ onComplete, onBack }) {
 
         try {
           const statusData = await api.getStatus();
-          console.log('Status response:', statusData);
+          console.log('Status response:', statusData, `Frames sent: ${framesSent}`);
           
           // Reset consecutive error counter on successful API call
           consecutiveErrors = 0;
@@ -421,7 +481,7 @@ function Step2_Scanning({ onComplete, onBack }) {
           setProgress(currentProgress);
           
           if (faceDetected) {
-            setMessage(`Scanning... ${Math.round(currentProgress)}% complete`);
+            setMessage(`Scanning... ${Math.round(currentProgress)}% complete (${framesSent} frames)`);
           } else {
             setMessage('⚠ Keep your face in the frame!');
           }
@@ -430,6 +490,7 @@ function Step2_Scanning({ onComplete, onBack }) {
           if (timeElapsed >= scanDuration * 1000) {
             console.log('Scan completed by time duration');
             clearInterval(pollIntervalRef.current);
+            clearInterval(frameIntervalRef.current);
             setScanning(false);
             setProgress(100);
             setMessage('Scan complete! Processing results...');
@@ -441,28 +502,37 @@ function Step2_Scanning({ onComplete, onBack }) {
           if (statusData.status === 'complete') {
             console.log('Scan completed by API status');
             clearInterval(pollIntervalRef.current);
+            clearInterval(frameIntervalRef.current);
             setScanning(false);
             setProgress(100);
             setMessage('Scan complete! Processing results...');
             setTimeout(() => onComplete(), 1500);
-          } else if (statusData.status === 'error' && timeElapsed < (scanDuration * 1000 * 0.8)) {
-            // Only fail if we're less than 80% through the time duration
+          } else if (statusData.status === 'error' && timeElapsed < (scanDuration * 1000 * 0.5)) {
+            // Only fail if we're less than 50% through the time duration
             console.error('API reported error status:', statusData);
-            clearInterval(pollIntervalRef.current);
-            setScanning(false);
-            setError('Scan encountered an issue. Please try again.');
-            scanStartedRef.current = false;
+            
+            // Check if we've sent enough frames - if yes, continue with time-based
+            if (framesSent < 10) {
+              clearInterval(pollIntervalRef.current);
+              clearInterval(frameIntervalRef.current);
+              setScanning(false);
+              setError(`Scan issue: ${statusData.message || 'Backend processing error'}. Try again or check camera permissions.`);
+              scanStartedRef.current = false;
+            } else {
+              console.log('API error but frames sent, continuing with time-based progress');
+            }
           }
-          // If API reports error but we're close to completion, ignore and continue with time-based
+          // If API reports error but we're far along or have sent frames, ignore and continue with time-based
           
         } catch (err) {
           console.error('Poll error:', err);
           consecutiveErrors++;
           
           // If we get too many consecutive errors, but we're far enough along, just complete
-          if (consecutiveErrors > 5 && timeBasedProgress > 50) {
-            console.log('Too many API errors, completing based on time');
+          if (consecutiveErrors > 10 && (timeBasedProgress > 50 || framesSent > 20)) {
+            console.log('Too many API errors, completing based on time/frames');
             clearInterval(pollIntervalRef.current);
+            clearInterval(frameIntervalRef.current);
             setScanning(false);
             setProgress(100);
             setMessage('Scan complete! Processing results...');
@@ -474,7 +544,7 @@ function Step2_Scanning({ onComplete, onBack }) {
           setProgress(timeBasedProgress);
           
           if (faceDetected) {
-            setMessage(`Scanning... ${Math.round(timeBasedProgress)}% complete`);
+            setMessage(`Scanning... ${Math.round(timeBasedProgress)}% complete (${framesSent} frames)`);
           } else {
             setMessage('⚠ Keep your face in the frame!');
           }
@@ -483,6 +553,7 @@ function Step2_Scanning({ onComplete, onBack }) {
           if (timeElapsed >= scanDuration * 1000) {
             console.log('Scan completed by time duration (API failed)');
             clearInterval(pollIntervalRef.current);
+            clearInterval(frameIntervalRef.current);
             setScanning(false);
             setProgress(100);
             setMessage('Scan complete! Processing results...');
@@ -501,6 +572,7 @@ function Step2_Scanning({ onComplete, onBack }) {
 
   const cleanup = () => {
     if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
     }
