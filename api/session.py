@@ -26,7 +26,7 @@ import time
 import threading
 import math
 import numpy as np
-from queue import Queue
+from camera.capture import CameraCapture
 # FaceDetector is imported lazily inside _run_scan() so the server
 # boots cleanly even before mediapipe is installed.
 from rppg.pipeline import RPPGPipeline
@@ -74,11 +74,6 @@ class ScanSession:
         self._result: dict | None = None
         self._metadata: UserMetadata | None = None
 
-        # Frame queue for frontend-based capture
-        self._frame_queue: Queue = Queue(maxsize=100)
-        self._scan_start_time: float = 0.0
-        self._scan_duration: int = 45
-
         # Heavy objects (created lazily)
         self._bp_estimator: BPEstimator | None = None
 
@@ -105,24 +100,6 @@ class ScanSession:
     def get_result(self) -> dict | None:
         with self._lock:
             return self._result
-    
-    def add_frame(self, frame: np.ndarray) -> None:
-        """Add a frame from the frontend to the processing queue."""
-        if self._status != "scanning":
-            logger.warning("Received frame but not scanning")
-            return
-        
-        # Update progress based on time elapsed
-        elapsed = time.time() - self._scan_start_time
-        progress = min((elapsed / self._scan_duration) * 100.0, 99.0)
-        with self._lock:
-            self._progress = round(progress, 1)
-        
-        # Add frame to queue (drop if full to avoid blocking)
-        try:
-            self._frame_queue.put_nowait(frame)
-        except:
-            pass  # Queue full, skip this frame
 
     def start_scan(self, algorithm: str = "pos", duration_seconds: int = SCAN_DURATION_SECONDS) -> bool:
         """
@@ -143,14 +120,6 @@ class ScanSession:
             self._progress = 0.0
             self._result = None
             self._error_message = ""
-            # Clear frame queue and set scan start time
-            while not self._frame_queue.empty():
-                try:
-                    self._frame_queue.get_nowait()
-                except:
-                    break
-            self._scan_start_time = time.time()
-            self._scan_duration = duration_seconds
 
         # Lazily initialise the BP model (first call trains it)
         if self._bp_estimator is None:
@@ -172,12 +141,6 @@ class ScanSession:
             self._progress = 0.0
             self._result = None
             self._error_message = ""
-        # Clear frame queue
-        while not self._frame_queue.empty():
-            try:
-                self._frame_queue.get_nowait()
-            except:
-                break
         logger.info("Session reset.")
 
     # ── Private: scan loop ─────────────────────────────────────────────────
@@ -185,37 +148,40 @@ class ScanSession:
     def _run_scan(self, algorithm: str, duration_seconds: int) -> None:
         """
         The entire scan pipeline runs here in a background thread:
-            receive frames from frontend → detect faces → collect RGB → extract pulse
+            open camera → detect faces → collect RGB → extract pulse
             → compute HR → compute HRV → estimate BP → estimate stress.
         """
         # Lazy import — keeps the server bootable even without mediapipe.
         # The ImportError (with install instructions) surfaces here if missing.
         from face.detector import FaceDetector
 
+        camera = CameraCapture()
         face_detector = FaceDetector()
         pipeline = RPPGPipeline(fps=CAMERA_FPS, algorithm=algorithm)
 
         try:
+            # ── Open camera ─────────────────────────────────────────────
+            if not camera.open():
+                self._set_error("Failed to open camera. Check webcam permissions.")
+                return
+
+            # Wait for the first frame
+            first = camera.wait_for_frame(timeout=3.0)
+            if first is None:
+                self._set_error("No frame received from camera.")
+                return
+
             start_time = time.time()
             elapsed = 0.0
-            frames_processed = 0
 
-            logger.info("Processing frames for %d seconds…", duration_seconds)
+            logger.info("Capturing for %d seconds…", duration_seconds)
 
-            # ── Main processing loop ───────────────────────────────────────
+            # ── Main capture loop ───────────────────────────────────────
             while elapsed < duration_seconds:
-                # Get frame from queue (with timeout)
-                try:
-                    frame = self._frame_queue.get(timeout=0.1)
-                    frames_processed += 1
-                except:
-                    # No frame available, check if we should continue
-                    elapsed = time.time() - start_time
-                    if elapsed < duration_seconds:
-                        time.sleep(0.01)
-                        continue
-                    else:
-                        break
+                frame = camera.get_latest_frame()
+                if frame is None:
+                    time.sleep(0.02)
+                    continue
 
                 # Face detection + ROI extraction
                 rois = face_detector.detect(frame)
@@ -223,31 +189,29 @@ class ScanSession:
                 # Feed ROIs into the rPPG pipeline (skips if no face)
                 pipeline.add_frame(rois)
 
-                # Update elapsed time
+                # Update progress
                 elapsed = time.time() - start_time
+                pct = min((elapsed / duration_seconds) * 100.0, 100.0)
+                with self._lock:
+                    self._progress = round(pct, 1)
 
-                time.sleep(0.01)   # Avoid busy-spinning
+                time.sleep(0.01)   # Avoid busy-spinning; ~100 iterations/s max
 
-            logger.info("Processing complete. Processed %d frames. Running signal processing…", frames_processed)
+            # ── Signal processing ───────────────────────────────────────
+            logger.info("Capture complete. Running signal processing…")
 
-            # Check if we have enough data
-            if frames_processed < 30:
-                self._set_error(f"Insufficient frames captured ({frames_processed}). Please ensure your face is visible.")
-                return
-
-            # ── Signal processing ───────────────────────────────────────────
             pulse = pipeline.extract_pulse()   # May raise ValueError
 
             # Determine effective FPS from the pipeline buffer
             effective_fps = CAMERA_FPS   # Use configured value
 
-            # ── HR estimation ───────────────────────────────────────────────
+            # ── HR estimation ───────────────────────────────────────────
             hr_result = estimate_hr(pulse, effective_fps)
 
-            # ── HRV estimation ──────────────────────────────────────────────
+            # ── HRV estimation ──────────────────────────────────────────
             hrv_result = compute_hrv(hr_result["rr_intervals"])
 
-            # ── BP estimation ───────────────────────────────────────────────
+            # ── BP estimation ───────────────────────────────────────────
             meta = self._metadata  # guaranteed non-None by start_scan guard
             bmi = _compute_bmi(meta.height_cm, meta.weight_kg)
             gender_male = 1 if meta.gender == "male" else 0
@@ -262,14 +226,14 @@ class ScanSession:
                 bmi=bmi,
             )
 
-            # ── Stress estimation ───────────────────────────────────────────
+            # ── Stress estimation ───────────────────────────────────────
             stress_result = estimate_stress(
                 hr_bpm=hr_result["hr_bpm"],
                 rmssd_ms=hrv_result["rmssd_ms"],
                 sdnn_ms=hrv_result["sdnn_ms"],
             )
 
-            # ── Assemble final response ─────────────────────────────────────
+            # ── Assemble final response ─────────────────────────────────
             result = {
                 "disclaimer": DISCLAIMER,
                 "hr": {
@@ -302,6 +266,7 @@ class ScanSession:
             self._set_error(f"Unexpected error during scan: {e}")
             logger.exception("Scan failed with exception:")
         finally:
+            camera.release()
             face_detector.close()
 
     def _set_error(self, message: str) -> None:
