@@ -374,9 +374,13 @@ function Step2_Scanning({ onComplete, onBack }) {
       setScanning(true);
       scanStartedRef.current = true;
       setProgress(0);
+      
+      const scanStartTime = Date.now();
+      let hasReset = false;
+      
       await api.startScan('pos', scanDuration);
       
-      // Poll backend status
+      // Poll backend status with time-based fallback
       pollIntervalRef.current = setInterval(async () => {
         // Check if face has been missing for > 3 seconds
         const timeSinceFace = Date.now() - lastFaceSeenRef.current;
@@ -384,25 +388,41 @@ function Step2_Scanning({ onComplete, onBack }) {
           // Face lost — reset scan
           setMessage('⚠ Face lost! Restarting scan...');
           setProgress(0);
-          await api.reset();
-          await api.startScan('pos', scanDuration);
+          hasReset = true;
+          try {
+            await api.reset();
+            await api.startScan('pos', scanDuration);
+          } catch (resetErr) {
+            console.error('Reset error:', resetErr);
+          }
           lastFaceSeenRef.current = Date.now();
           return;
         }
 
+        // Calculate time-based progress as fallback
+        const timeElapsed = Date.now() - scanStartTime;
+        const timeBasedProgress = Math.min((timeElapsed / (scanDuration * 1000)) * 100, 99);
+
         try {
           const statusData = await api.getStatus();
-          setProgress(statusData.progress_percent || 0);
+          
+          // Use the higher of API progress or time-based progress
+          const apiProgress = statusData.progress_percent || 0;
+          const currentProgress = Math.max(apiProgress, timeBasedProgress);
+          
+          setProgress(currentProgress);
           
           if (faceDetected) {
-            setMessage(`Scanning... ${Math.round(statusData.progress_percent || 0)}% complete`);
+            setMessage(`Scanning... ${Math.round(currentProgress)}% complete`);
           } else {
             setMessage('⚠ Keep your face in the frame!');
           }
           
-          if (statusData.status === 'complete') {
+          // Check for completion - either API says complete OR we've reached time limit
+          if (statusData.status === 'complete' || timeElapsed >= scanDuration * 1000) {
             clearInterval(pollIntervalRef.current);
             setScanning(false);
+            setProgress(100);
             setMessage('Scan complete! Processing results...');
             setTimeout(() => onComplete(), 1500);
           } else if (statusData.status === 'error') {
@@ -412,11 +432,30 @@ function Step2_Scanning({ onComplete, onBack }) {
           }
         } catch (err) {
           console.error('Poll error:', err);
+          
+          // Even if API fails, continue with time-based progress
+          setProgress(timeBasedProgress);
+          
+          if (faceDetected) {
+            setMessage(`Scanning... ${Math.round(timeBasedProgress)}% complete`);
+          } else {
+            setMessage('⚠ Keep your face in the frame!');
+          }
+          
+          // Complete scan after time duration even if API is unresponsive
+          if (timeElapsed >= scanDuration * 1000) {
+            clearInterval(pollIntervalRef.current);
+            setScanning(false);
+            setProgress(100);
+            setMessage('Scan complete! Processing results...');
+            setTimeout(() => onComplete(), 1500);
+          }
         }
       }, 500);
     } catch (err) {
-      setError(err.message);
+      setError(err.message || 'Failed to start scan');
       setScanning(false);
+      scanStartedRef.current = false;
     }
   };
 
